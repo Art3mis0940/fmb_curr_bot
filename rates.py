@@ -2,6 +2,8 @@ import re
 import time
 import logging
 import asyncio
+import socket
+import aiohttp
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,13 +19,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 exchange_rates = {}
 last_update_time = 0
 user_last_choice = {}
-user_last_bot_message_id = {}  # ID последнего сообщения бота для каждого пользователя
+user_last_bot_message_id = {}
+
+# Глобальная переменная для бота (будет инициализирована в main)
+bot = None
 
 async def fetch_all_rates():
     """Парсит всю таблицу курсов из вкладки 'В мобильном приложении'."""
     global exchange_rates, last_update_time
     
-    logging.info(" Запускаем браузер для обновления курсов...")
+    logging.info("🌐 Запускаем браузер для обновления курсов...")
     
     try:
         async with async_playwright() as p:
@@ -101,8 +106,37 @@ def get_main_keyboard():
         ]
     ])
 
-# --- Инициализация бота ---
-bot = Bot(token=BOT_TOKEN)
+async def edit_or_send(user_id, text, parse_mode=None, reply_markup=None):
+    """Редактирует последнее сообщение бота или отправляет новое."""
+    message_id = user_last_bot_message_id.get(user_id)
+    
+    try:
+        if message_id:
+            await bot.edit_message_text(
+                chat_id=user_id,
+                message_id=message_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+        else:
+            msg = await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+            user_last_bot_message_id[user_id] = msg.message_id
+    except Exception:
+        msg = await bot.send_message(
+            chat_id=user_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
+        )
+        user_last_bot_message_id[user_id] = msg.message_id
+
+# --- Инициализация роутера ---
 dp = Dispatcher()
 router = Router()
 
@@ -111,14 +145,10 @@ async def cmd_start(message: Message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name.capitalize() if message.from_user.first_name else "друг"
     
-    # Сбрасываем выбор при /start
     if user_id in user_last_choice:
         del user_last_choice[user_id]
     
-    text = (
-        f"Привет, {user_name}! 👋\n\n"
-        "Выбери направление конвертации:"
-    )
+    text = f"Привет, {user_name}! 👋\n\nВыбери направление конвертации:"
     
     msg = await message.answer(text, reply_markup=get_main_keyboard())
     user_last_bot_message_id[user_id] = msg.message_id
@@ -131,88 +161,54 @@ async def handle_currency_selection(callback: CallbackQuery):
     
     currency_name = "тенге" if currency == "KZT" else "долларах"
     
-    text = (
-        f"💳 Выбрано: RUB → {currency}\n\n"
-        f"Введи сумму в {currency_name} (только число):"
-    )
+    text = f"💳 Выбрано: RUB → {currency}\n\nВведи сумму в {currency_name} (только число):"
     
-    # Редактируем последнее сообщение бота
-    message_id = user_last_bot_message_id.get(user_id)
-    if message_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=user_id,
-                message_id=message_id,
-                text=text
-            )
-        except Exception:
-            # Если не удалось редактировать, отправляем новое
-            msg = await bot.send_message(chat_id=user_id, text=text)
-            user_last_bot_message_id[user_id] = msg.message_id
-    
+    await edit_or_send(user_id, text)
     await callback.answer()
 
 @router.message(F.text)
 async def handle_amount(message: Message):
     user_id = message.from_user.id
     
-    # Удаляем сообщение пользователя
     try:
         await bot.delete_message(chat_id=user_id, message_id=message.message_id)
     except Exception:
-        pass  # Если не удалось удалить, продолжаем
+        pass
     
     text = message.text.strip().replace(',', '.')
     
-    # Проверяем, что введено число
     try:
         amount = float(text)
         if amount <= 0:
             raise ValueError
     except ValueError:
-        # Отправляем ошибку и удаляем через 3 секунды
-        error_msg = await message.answer("️ Введи только положительное число (например: 1500 или 50.5)")
+        error_msg = await message.answer("⚠️ Введи только положительное число (например: 1500 или 50.5)")
         await asyncio.sleep(3)
         try:
             await bot.delete_message(chat_id=user_id, message_id=error_msg.message_id)
-        except:
+        except Exception:
             pass
         return
     
-    # Проверяем, выбрал ли пользователь валюту
     currency = user_last_choice.get(user_id)
     if not currency:
-        msg = await message.answer(
-            "Сначала выбери направление конвертации:",
-            reply_markup=get_main_keyboard()
-        )
+        msg = await message.answer("Сначала выбери направление конвертации:", reply_markup=get_main_keyboard())
         user_last_bot_message_id[user_id] = msg.message_id
         return
     
-    # Показываем статус "Считаю..."
     message_id = user_last_bot_message_id.get(user_id)
     if message_id:
         try:
-            await bot.edit_message_text(
-                chat_id=user_id,
-                message_id=message_id,
-                text="⏳ Считаю..."
-            )
+            await bot.edit_message_text(chat_id=user_id, message_id=message_id, text="⏳ Считаю...")
         except Exception:
             msg = await message.answer("⏳ Считаю...")
             user_last_bot_message_id[user_id] = msg.message_id
             message_id = msg.message_id
     
-    # Проверяем наличие курсов
     if not exchange_rates:
-        await bot.edit_message_text(
-            chat_id=user_id,
-            message_id=message_id,
-            text="❌ Курсы недоступны. Попробуй позже."
-        )
+        await bot.edit_message_text(chat_id=user_id, message_id=message_id, text="❌ Курсы недоступны. Попробуй позже.")
         return
     
-    # Получаем курс
     rate = None
     currency_symbol = currency
     
@@ -220,25 +216,16 @@ async def handle_amount(message: Message):
         if "RUB/KZT" in exchange_rates:
             rate = exchange_rates["RUB/KZT"]["buy"]
         else:
-            await bot.edit_message_text(
-                chat_id=user_id,
-                message_id=message_id,
-                text="❌ Курс RUB/KZT не найден."
-            )
+            await bot.edit_message_text(chat_id=user_id, message_id=message_id, text="❌ Курс RUB/KZT не найден.")
             return
-    else:  # USD
+    else:
         if "USD/RUB" in exchange_rates:
             usd_rub_sell = exchange_rates["USD/RUB"]["sell"]
             rate = 1 / usd_rub_sell
         else:
-            await bot.edit_message_text(
-                chat_id=user_id,
-                message_id=message_id,
-                text="❌ Курс USD/RUB не найден."
-            )
+            await bot.edit_message_text(chat_id=user_id, message_id=message_id, text="❌ Курс USD/RUB не найден.")
             return
     
-    # Рассчитываем
     result = calculate_topup(amount, rate)
     
     response_text = (
@@ -259,14 +246,28 @@ async def handle_amount(message: Message):
         reply_markup=get_main_keyboard()
     )
 
+# --- Главная функция запуска ---
 async def main():
+    global bot
+    
+    # 1. Создаем коннектор и сессию СТРОГО внутри асинхронной функции
+    connector = aiohttp.TCPConnector(family=socket.AF_INET)
+    session = aiohttp.ClientSession(connector=connector)
+    
+    # 2. Инициализируем бота
+    bot = Bot(token=BOT_TOKEN, session=session)
+    
     dp.include_router(router)
     
     await fetch_all_rates()
     asyncio.create_task(daily_rate_updater())
     
     logging.info("🤖 Бот запущен и готов к работе!")
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
