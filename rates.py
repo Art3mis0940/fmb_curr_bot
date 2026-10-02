@@ -6,6 +6,7 @@ import socket
 import aiohttp
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, Router, F
+from aiogram.client.session.aiohttp import AiohttpSession  # <-- ДОБАВЛЕНО
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from playwright.async_api import async_playwright
@@ -21,7 +22,7 @@ last_update_time = 0
 user_last_choice = {}
 user_last_bot_message_id = {}
 
-# Глобальная переменная для бота (будет инициализирована в main)
+# Глобальная переменная для бота
 bot = None
 
 async def fetch_all_rates():
@@ -250,11 +251,13 @@ async def handle_amount(message: Message):
 async def main():
     global bot
     
-    # 1. Создаем коннектор и сессию СТРОГО внутри асинхронной функции
+    # 1. Создаем коннектор, который принудительно использует только IPv4
     connector = aiohttp.TCPConnector(family=socket.AF_INET)
-    session = aiohttp.ClientSession(connector=connector)
     
-    # 2. Инициализируем бота
+    # 2. Создаем правильную сессию для aiogram 3.x
+    session = AiohttpSession(connector=connector)
+    
+    # 3. Инициализируем бота с этой сессией
     bot = Bot(token=BOT_TOKEN, session=session)
     
     dp.include_router(router)
